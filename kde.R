@@ -1,89 +1,140 @@
 rm(list = ls())
 
 library(stats)
+library(sinew)
 
-# Kernel Density Estimation with Mean Integrated Squared Error (MISE)
+# -----------------------------------------------------------------------------
+# ---- Kernel Density Estimation with Mean Integrated Squared Error (MISE) ----
+# -----------------------------------------------------------------------------
+
+#' @title sigma_n
+#' @description Gernerate the robust estimate of standard deviation
+#' @param x A numeric input vector
+#' @return a numeric value
+#' @export
 sigma_n <- function(x) {
   min(IQR(x) / (qnorm(0.75) - qnorm(0.25)), sd(x))
 }
 
-# Initialize bandwidth
-initial_bandwidth <- function(x, rho) rho * sigma_n(x) * length(x)^(-1 / 5)
-
 # Define functions for the normal pdf and its second derivative
+#' @title phi
+#' @description Create the normal pdf
+#' @param u A numeric value
+#' @return A density value at a given point u
+#' @export
 phi <- function(u) (1 / sqrt(2 * pi)) * exp(-0.5 * u^2)
+
+#' @title phi_pp
+#' @description Create the second derivative of the normal pdf
+#' @param u A numeric value
+#' @return A numeric value of the second derivative of the density function at a given point u
+#' @export
 phi_pp <- function(u) (u^2 - 1) * phi(u)
 
-# Estimate f''
-fpp_hat <- function(x, y, h, k) {
+#' @title fpp_hat
+#' @description Estimate f'' on a grid with the pilot bandwidth
+#' @param x A numeric vector of x_i
+#' @param y A numeric vector of x
+#' @param h A numeric value of pilot bandwidth
+#' @return The kernel-based estimate of curvature of the density function
+#' @export
+fpp_hat <- function(x, y, h) {
   u <- function(y, x) (y - x) / h
-  U <- outer(y, x, u)
-  return(rowMeans(phi_pp(U)) / (h^k))
+  u_mat <- outer(y, x, u)
+  return(rowMeans(phi_pp(u_mat)) / h^3)
 }
 
-# Estimate R(f'')
-R_fpp_hat <- function(x, h, multiplier, m) {
+#' @title R_fpp_hat
+#' @description Calculate the integrated squared second derivative of the density function.
+#' @param x A numeric input vector
+#' @param h A numeric value of bandwidth
+#' @param multiplier A numeric multiplier for evaluation points
+#' @param n_eval The number of KDE evaluation points
+#' @return A numeric value of the integrated squared second derivative of pdf
+#' @export
+R_fpp_hat <- function(x, h, multiplier, n_eval) {
   lower_bound <- min(x) - multiplier * sigma_n(x)
   upper_bound <- max(x) + multiplier * sigma_n(x)
-  y <- seq(lower_bound, upper_bound, length.out = m)
-  fpp_n <- fpp_hat(x, y, h, k = 1)
+  y <- seq(lower_bound, upper_bound, length.out = n_eval)
+  fpp_n <- fpp_hat(x, y, h)
   dx <- min(diff(y))
   return(sum(fpp_n^2 * dx))
 }
 
-# Update bandwidth
-bandwidth_update <- function(n, R_fpp_n) {
-  ((1 / (2 * sqrt(pi)) / R_fpp_n)^(1 / 5)) * n^(-1 / 5)
+#' @title update_bandwidth
+#' @description Update the bandwidth of KDE
+#' @param n The sample size
+#' @param R_fpp_n The integrated squared second derivative
+#' @return The updated bandwidth
+#' @details DETAILS
+#' @export
+update_bandwidth <- function(n, R_fpp_n) {
+  (1 / (2 * sqrt(pi) * R_fpp_n))^(1 / 5) * n^(-1 / 5)
 }
 
-# Find the optimal bandwidth
-bandwidth_mise <- function(x, epsilon, multiplier, m) {
+#' @title bandwidth_mise
+#' @description Find the optimal bandwidth
+#' @param x A numeric input vector
+#' @param guess_bandwidth The initial bandwidth
+#' @param epsilon The difference between the old and updated bandwidths
+#' @param multiplier A numeric multiplier for evaluation points
+#' @param n_eval The number of KDE evaluation points
+#' @return The converged bandwidth
+#' @export
+bandwidth_mise <- function(x, guess_bandwidth, epsilon, multiplier, n_eval) {
   n <- length(x)
-  h_0 <- initial_bandwidth(x, rho = 0.9)
 
-  R_fpp_n <- R_fpp_hat(x, h_0, multiplier, m)
-  h_update <- bandwidth_update(n, R_fpp_n)
+  message(sprintf(
+    "guess_bandwidth = %.5f", guess_bandwidth
+  ))
+
+  R_fpp_n <- R_fpp_hat(x, guess_bandwidth, multiplier, n_eval)
+  bandwidth_update <- update_bandwidth(n, R_fpp_n)
   iteration <- 0
 
-  while (abs(h_update - h_0) > epsilon) {
+  while (abs(bandwidth_update - guess_bandwidth) > epsilon) {
     iteration <- iteration + 1
-    h_0 <- h_update
-    R_fpp_n <- R_fpp_hat(x, h_0, multiplier, m)
-    h_update <- bandwidth_update(n, R_fpp_n)
+    guess_bandwidth <- bandwidth_update
+    R_fpp_n <- R_fpp_hat(x, guess_bandwidth, multiplier, n_eval)
+    bandwidth_update <- update_bandwidth(n, R_fpp_n)
     message(sprintf(
-      "iteration=%d  h_old=%.5f  h_update=%.5f",
-      iteration, h_0, h_update
+      "iteration %d  h_old = %.5f  bandwidth_update = %.5f",
+      iteration, guess_bandwidth, bandwidth_update
     ))
   }
 
-  return(h_0)
+  return(bandwidth_update)
 }
 
 # Example
 set.seed(13579)
+
+epsilon <- 1e-6
+multiplier <- 5
+n_eval <- 1e3
+
 x <- c(
   rnorm(1e4, mean = -4, sd = 0.8),
   rnorm(1e4, mean = -2, sd = 0.5),
   rnorm(1e4, mean = 4, sd = 1.0)
 )
 
-h_0 <- initial_bandwidth(x, rho = 5)
-h_s <- bandwidth_mise(x, epsilon = 1e-6, multiplier = 5, m = 5e3)
-cat(sprintf("\nEstimated bandwidth: h = %.5f\n", h_s))
+guess_bandwidth <- 5
+bandwidth_s <- bandwidth_mise(x, guess_bandwidth, epsilon, multiplier, n_eval)
+cat(sprintf("\nEstimated bandwidth: h = %.5f\n", bandwidth_s))
 
-# KDEs comparison
+# KDE comparison
 hist(x,
   breaks = 70,
   probability = TRUE, col = "lightgray",
-  border = "white", main = "Kernel Density Estimation",
-  xlab = "x"
+  border = "white", main = "Kernel Density Estimation"
 )
-lines(density(x, bw = h_0), col = "blue", lwd = 2)
-lines(density(x, bw = h_s), col = "firebrick", lwd = 2)
+lines(density(x, bw = guess_bandwidth), col = "blue", lwd = 2)
+lines(density(x, bw = bandwidth_s), col = "firebrick", lwd = 2)
 legend("topright",
   c(
-    sprintf("KDE (initial bandwidth): h=%.3f", h_0),
-    sprintf("KDE (optimal bandwidth): h=%.3f", h_s)
+    sprintf("KDE (initial bandwidth): h=%.3f", guess_bandwidth),
+    sprintf("KDE (optimal bandwidth): h=%.3f", bandwidth_s)
   ),
   col = c("blue", "firebrick"), lty = c(1, 2), lwd = 2, bty = "n"
 )
